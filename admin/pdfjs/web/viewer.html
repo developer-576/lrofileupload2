@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="google" content="notranslate">
+  <title>Secure PDF Viewer</title>
+  <style>
+    :root { --toolbar-h: 44px; }
+    html, body { margin:0; height:100%; background:#f4f6f9; color:#111; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
+    #toolbar { height:var(--toolbar-h); display:flex; align-items:center; gap:.5rem; padding:.5rem .75rem; background:#fff; border-bottom:1px solid #e5e7eb; position:sticky; top:0; z-index:10; }
+    #viewerContainer { position:absolute; top:var(--toolbar-h); left:0; right:0; bottom:0; overflow:auto; background:#9ea7b3; }
+    #pageHost { display:flex; flex-direction:column; align-items:center; gap:12px; padding:16px; }
+    canvas { background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.15); }
+    button, input { height:32px; }
+    input[type=number] { width:70px; padding:0 .4rem; }
+    .sp { opacity:.65; }
+    #status { font-size:12px; }
+  </style>
+</head>
+<body>
+
+  <div id="toolbar">
+    <button id="prevBtn">Previous</button>
+    <input type="number" id="pageNumber" value="1" min="1" />
+    <span class="sp">/</span>
+    <span id="numPages">–</span>
+    <button id="nextBtn">Next</button>
+
+    <span style="flex:0 0 1px; width:1px; height:24px; background:#e5e7eb; margin:0 .5rem;"></span>
+
+    <button id="zoomOutBtn">Zoom Out</button>
+    <button id="zoomInBtn">Zoom In</button>
+
+    <span style="flex:0 0 1px; width:1px; height:24px; background:#e5e7eb; margin:0 .5rem;"></span>
+
+    <button id="rotateCwBtn">Rotate ⟳</button>
+    <button id="rotateCcwBtn">Rotate ⟲</button>
+
+    <span id="status" class="sp" style="margin-left:auto;"></span>
+  </div>
+
+  <div id="viewerContainer">
+    <div id="pageHost"></div>
+  </div>
+
+  <!-- UMD pdf.js -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+
+    function getFileParam() {
+      const qs = new URLSearchParams(location.search);
+      let v = qs.get('file');
+      if (!v) return null;
+      try {
+        const once = decodeURIComponent(v);
+        if (/^https?:%2F%2F/i.test(once)) return decodeURIComponent(once);
+        return once;
+      } catch { return v; }
+    }
+
+    const pdfUrl = getFileParam();
+    const statusEl = document.getElementById('status');
+    const pageHost = document.getElementById('pageHost');
+    const pageNumberInput = document.getElementById('pageNumber');
+    const numPagesEl = document.getElementById('numPages');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    const zoomInBtn = document.getElementById('zoomInBtn');
+    const zoomOutBtn = document.getElementById('zoomOutBtn');
+    const rotateCwBtn = document.getElementById('rotateCwBtn');
+    const rotateCcwBtn = document.getElementById('rotateCcwBtn');
+
+    let pdfDoc = null, currentPage = 1, scale = 1.2, rotation = 0, rendering = false;
+    function setStatus(msg) { statusEl.textContent = msg || ''; }
+    function clearPages(){ while(pageHost.firstChild) pageHost.removeChild(pageHost.firstChild); }
+
+    async function headCheck(url){
+      try {
+        const r = await fetch(url, { method:'HEAD', credentials:'include' });
+        const ct = r.headers.get('content-type') || '';
+        setStatus(`Probe: ${r.status} ${r.statusText}  ${ct}`);
+        return r.ok;
+      } catch (e) {
+        setStatus('Probe failed: ' + (e.message || e));
+        return false;
+      }
+    }
+
+    async function renderPage(n){
+      if(!pdfDoc) return;
+      rendering = true; setStatus('Rendering…'); clearPages();
+      try{
+        const page = await pdfDoc.getPage(n);
+        const viewport = page.getViewport({ scale, rotation });
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d', { alpha:false });
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        pageHost.appendChild(canvas);
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        pageNumberInput.value = String(n);
+        numPagesEl.textContent = String(pdfDoc.numPages);
+        setStatus('');
+      }catch(e){ console.error(e); setStatus('Failed to render page.'); }
+      finally{ rendering = false; }
+    }
+    function queueRender(n){ if(rendering){ setTimeout(()=>queueRender(n),80); return; } renderPage(n); }
+
+    prevBtn.addEventListener('click', ()=>{ if(pdfDoc && currentPage>1){ currentPage--; queueRender(currentPage);} });
+    nextBtn.addEventListener('click', ()=>{ if(pdfDoc && currentPage<pdfDoc.numPages){ currentPage++; queueRender(currentPage);} });
+    pageNumberInput.addEventListener('change', ()=>{
+      if(!pdfDoc) return;
+      let n = parseInt(pageNumberInput.value,10); if(isNaN(n)) n = currentPage;
+      n = Math.min(Math.max(1,n), pdfDoc.numPages); currentPage=n; queueRender(currentPage);
+    });
+    zoomInBtn.addEventListener('click', ()=>{ scale = Math.min(scale*1.2,6); queueRender(currentPage); });
+    zoomOutBtn.addEventListener('click', ()=>{ scale = Math.max(scale/1.2,0.2); queueRender(currentPage); });
+    rotateCwBtn.addEventListener('click', ()=>{ rotation=(rotation+90)%360; queueRender(currentPage); });
+    rotateCcwBtn.addEventListener('click', ()=>{ rotation=(rotation+270)%360; queueRender(currentPage); });
+
+    (async ()=>{
+      if(!pdfUrl){ setStatus('Missing ?file=… parameter.'); return; }
+      const ok = await headCheck(pdfUrl);
+      if(!ok){ setStatus(statusEl.textContent + '  (Open the ?file= URL directly; fix 404 first.)'); return; }
+      try{
+        setStatus('Loading…');
+        const task = pdfjsLib.getDocument({ url: pdfUrl, withCredentials:true });
+        pdfDoc = await task.promise;
+        currentPage=1; numPagesEl.textContent = String(pdfDoc.numPages);
+        await renderPage(currentPage);
+      }catch(e){ console.error(e); setStatus('Failed to load PDF.'); }
+    })();
+
+    document.addEventListener('contextmenu', e=>e.preventDefault());
+  </script>
+</body>
+</html>
